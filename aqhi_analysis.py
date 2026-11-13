@@ -76,3 +76,38 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ========== Парсинг low visibility hours ==========
+# Fallback: значения из отчёта EPD (2004-2025)
+FALLBACK_LOW_VIS = {
+    "year": list(range(2004, 2026)),
+    "low_vis": [1570, 1502, 1257, 1298, 1100, 1139, 1225, 1399, 887, 978,
+                622, 667, 509, 645, 518, 475, 346, 258, 401, 296, 286, 266],
+}
+
+
+def load_low_vis() -> pd.DataFrame:
+    """Пытается спарсить таблицу low visibility со страницы EPD, иначе fallback."""
+    try:
+        from io import StringIO
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(URL, headers=headers, timeout=30)
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
+
+        for t in tables:
+            # Ищем строку "Low Visibility Hours" в первом столбце
+            mask = t.iloc[:, 0].astype(str).str.contains("Low Visibility", na=False)
+            if mask.any():
+                row = t[mask].iloc[0]
+                years = [int(str(y).strip()) for y in t.columns[1:]]
+                values = pd.to_numeric(row.iloc[1:].values, errors="coerce")
+                df = pd.DataFrame({"year": years, "low_vis": values}).dropna()
+                if len(df) >= 10:
+                    print(f"[OK] Low visibility спарсено {len(df)} строк")
+                    return df.sort_values("year").reset_index(drop=True)
+    except Exception as e:
+        print(f"[WARN] Парсинг low visibility не удался: {e}")
+
+    print("[INFO] Использую запасные данные low visibility из отчёта EPD")
+    return pd.DataFrame(FALLBACK_LOW_VIS)
