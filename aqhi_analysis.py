@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from prophet import Prophet
+from io import StringIO
+from scipy.stats import pearsonr, spearmanr
 
 URL = "https://www.aqhi.gov.hk/en/past-data/hkaq2025.html"
 
@@ -14,17 +16,22 @@ FALLBACK_PM25 = {
              28.7, 25.3, 22.0, 21.8, 19.9, 19.2, 15.0, 15.2, 14.0, 14.6, 15.1, 14.6],
 }
 
+FALLBACK_LOW_VIS = {
+    "year": list(range(2004, 2026)),
+    "low_vis": [1570, 1502, 1257, 1298, 1100, 1139, 1225, 1399, 887, 978,
+                622, 667, 509, 645, 518, 475, 346, 258, 401, 296, 286, 266],
+}
+
 
 def load_data() -> pd.DataFrame:
-    """Пытается спарсить таблицу со страницы EPD, иначе берёт запасные данные."""
+    """Пытается спарсить таблицу PM2.5 со страницы EPD, иначе берёт запасные данные."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(URL, headers=headers, timeout=30)
         resp.raise_for_status()
-        tables = pd.read_html(resp.text)
+        tables = pd.read_html(StringIO(resp.text))
 
         for t in tables:
-            # Ищем строку PM2.5
             mask = t.iloc[:, 0].astype(str).str.contains("PM2.5", na=False)
             if mask.any():
                 row = t[mask].iloc[0]
@@ -40,25 +47,16 @@ def load_data() -> pd.DataFrame:
     print("[INFO] Использую запасные данные из отчёта EPD")
     return pd.DataFrame(FALLBACK_PM25)
 
-# ========== Парсинг low visibility hours ==========
-# Fallback: значения из отчёта EPD (2004-2025)
-FALLBACK_LOW_VIS = {
-    "year": list(range(2004, 2026)),
-    "low_vis": [1570, 1502, 1257, 1298, 1100, 1139, 1225, 1399, 887, 978,
-                622, 667, 509, 645, 518, 475, 346, 258, 401, 296, 286, 266],
-}
 
 def load_low_vis() -> pd.DataFrame:
     """Пытается спарсить таблицу low visibility со страницы EPD, иначе fallback."""
     try:
-        from io import StringIO
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(URL, headers=headers, timeout=30)
         resp.raise_for_status()
         tables = pd.read_html(StringIO(resp.text))
 
         for t in tables:
-            # Ищем строку "Low Visibility Hours" в первом столбце
             mask = t.iloc[:, 0].astype(str).str.contains("Low Visibility", na=False)
             if mask.any():
                 row = t[mask].iloc[0]
@@ -82,7 +80,7 @@ def main():
     print(df.tail())
     df.to_csv("pm25_hk_2004_2025.csv", index=False)
 
-    # График тренда
+    # ========== График тренда PM2.5 ==========
     plt.figure(figsize=(10, 5))
     plt.plot(df["year"], df["pm25"], marker="o")
     plt.title("Hong Kong Annual Mean PM2.5 (2004–2025)")
@@ -90,17 +88,31 @@ def main():
     plt.grid(True); plt.tight_layout()
     plt.savefig("pm25_trend.png", dpi=150)
 
-    # Гипотеза: значимый линейный тренд
+    # ========== Гипотеза 1: значимый линейный тренд ==========
     X = sm.add_constant(df["year"])
     model = sm.OLS(df["pm25"], X).fit()
     print(model.summary())
 
-    # Прогноз Prophet
-    prophet_df = df.rename(columns={"year": "ds", "pm25": "y"})
+    # ========== Гипотеза 2: корреляция PM2.5 и low visibility ==========
+    r_p, p_p = pearsonr(df["pm25"], df["low_vis"])
+    r_s, p_s = spearmanr(df["pm25"], df["low_vis"])
+    print(f"\nPearson r={r_p:.3f}, p={p_p:.4g}")
+    print(f"Spearman r={r_s:.3f}, p={p_s:.4g}")
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(df["pm25"], df["low_vis"], color="steelblue")
+    plt.xlabel("PM2.5 (µg/m³)")
+    plt.ylabel("Low visibility hours")
+    plt.title(f"PM2.5 vs Low Visibility (r={r_p:.2f})")
+    plt.grid(True); plt.tight_layout()
+    plt.savefig("pm25_vs_visibility.png", dpi=150)
+
+    # ========== Прогноз Prophet ==========
+    prophet_df = df[["year", "pm25"]].rename(columns={"year": "ds", "pm25": "y"})
     prophet_df["ds"] = pd.to_datetime(prophet_df["ds"].astype(str) + "-01-01")
     m = Prophet(yearly_seasonality=False, weekly_seasonality=False, daily_seasonality=False)
     m.fit(prophet_df)
-    future = m.make_future_dataframe(periods=3, freq="Y")
+    future = m.make_future_dataframe(periods=3, freq="YE")
     forecast = m.predict(future)
 
     fig = m.plot(forecast)
@@ -112,3 +124,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
